@@ -1,0 +1,18 @@
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# Personal MCP config (points at your own Obsidian vault) — copy from the .example
+mcp/cockpit.mcp.json
