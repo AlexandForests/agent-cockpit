@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Bring up (or reattach) the agent cockpit on the current terminal.
+# Run this from a fullscreen WezTerm window pinned to monitor 2.
+#
+# Layout lives at ~/.config/zellij/layouts/cockpit.kdl (symlinked from this repo).
+# If a "cockpit" session already exists we reattach (keeps your panes — Phase 6
+# persistence); otherwise we create a new one named "cockpit" with the layout.
+
+set -uo pipefail
+
+SESSION=cockpit
+
+# `cockpit --fresh` rebuilds from the current layout. Needed after editing the layout/protocol:
+# a normal launch resurrects the saved session and would ignore your changes.
+if [ "${1:-}" = "--fresh" ] || [ "${1:-}" = "-f" ]; then
+    zellij delete-session "$SESSION" -f 2>/dev/null
+    echo "cockpit: cleared saved session — rebuilding from layout"
+fi
+
+# Don't nest: zellij can't create/attach a session from inside another one.
+if [ -n "${ZELLIJ:-}" ]; then
+    echo "cockpit: already inside a zellij session — detach first (Ctrl-q), then run cockpit." >&2
+    exit 1
+fi
+
+# Match active AND exited/resurrectable sessions (use -n so exited ones are listed too,
+# so a reboot + `cockpit` resurrects the grid). -f re-runs the panes' commands on resurrect.
+if zellij list-sessions -n 2>/dev/null | grep -qE "^${SESSION}( |$)"; then
+    exec zellij attach -f "$SESSION"
+else
+    # -n <layout>: always start a NEW session using that layout (by name)
+    # -s <name>:   name the new session
+    exec zellij -n "$SESSION" -s "$SESSION"
+fi
