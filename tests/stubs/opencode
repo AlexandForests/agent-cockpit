@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stub opencode for tests. Usage mirrors: opencode run "<prompt>" -m <model>
+# Edits ./calc.py only when the model name contains "good"; otherwise does nothing.
+model=""
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-m" ]; then model="${args[$((i+1))]}"; fi
+done
+case "$model" in
+    *good*) printf 'def add(a, b):\n    return a + b\n' > calc.py ;;
+    *)      : ;;  # bad model: produce no change
+esac
+exit 0

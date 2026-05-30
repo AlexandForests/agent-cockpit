@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""cockpit-ask — free completion worker for the cockpit.
+
+Default: razernode (3070, tailnet) — free, local, private. If razernode is unreachable
+(laptop asleep), it falls back to a free cloud model so completions never hard-fail.
+Use it for mechanical work (codegen, drafts, explanations, one-shot answers) so the
+orchestrate Claude spends its tokens on routing, not grunt work. No tool loop — it
+returns text; you review/apply it.
+
+Usage:
+    cockpit-ask "write a python function that validates an email"
+    cockpit-ask --model opencode/big-pickle "harder one-shot codegen"
+    echo "explain this regex: ^\\d{3}-\\d{4}$" | cockpit-ask
+Env: COCKPIT_ASK_ENDPOINT overrides the razernode base URL.
+"""
+import sys, os, re, json, time, subprocess, urllib.request
+
+ENDPOINT = os.environ.get("COCKPIT_ASK_ENDPOINT", "http://localhost:11434").rstrip("/") + "/v1/chat/completions"
+RAZER_MODEL = "qwen2.5-coder-32k:latest"
+FALLBACK_MODEL = "opencode/deepseek-v4-flash-free"   # free cloud, used when razernode is down
+DONE = os.path.expanduser("~/cockpit/tasks/done")
+SYSTEM = ("You are a precise code generator. Output only what is asked — code or a "
+          "direct answer, no preamble and no markdown fences unless explicitly requested.")
+
+
+def strip_fences(text):
+    t = text.strip()
+    if not t.startswith("```"):
+        return text
+    lines = t.split("\n")[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def via_razernode(prompt):
+    body = json.dumps({
+        "model": RAZER_MODEL,
+        "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+        "temperature": 0.1,
+    }).encode()
+    req = urllib.request.Request(ENDPOINT, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:   # first hit loads the model (~30s)
+        return json.load(r)["choices"][0]["message"]["content"]
+
+
+def via_opencode(prompt, model):
+    """Route through opencode (used for the cloud fallback and explicit --model)."""
+    r = subprocess.run(["opencode", "run", f"{SYSTEM}\n\n{prompt}", "-m", model],
+                       capture_output=True, text=True, timeout=180)
+    out = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", r.stdout)        # strip ANSI
+    lines = out.splitlines()
+    idx = next((i for i, l in enumerate(lines) if l.strip().startswith("> build")), -1)
+    if idx >= 0:
+        lines = lines[idx + 1:]                                  # drop opencode's header framing
+    return "\n".join(lines).strip()
+
+
+def main():
+    args = sys.argv[1:]
+    model = None
+    if args and args[0] in ("--model", "-m"):
+        if len(args) < 2:
+            sys.exit("cockpit-ask: --model needs a value")
+        model, args = args[1], args[2:]
+    prompt = " ".join(args).strip()
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+    if not prompt:
+        sys.exit('usage: cockpit-ask [--model PROVIDER/MODEL] "<prompt>"   (or pipe on stdin)')
+
+    if model:                                    # explicit model -> opencode
+        backend = model
+        out = via_opencode(prompt, model)
+    else:
+        try:
+            out = via_razernode(prompt)
+            backend = f"razernode ({RAZER_MODEL})"
+        except Exception as e:                   # laptop asleep / unreachable -> free cloud fallback
+            print(f"cockpit-ask: razernode unreachable ({e}); falling back to {FALLBACK_MODEL}", file=sys.stderr)
+            out = via_opencode(prompt, FALLBACK_MODEL)
+            backend = f"{FALLBACK_MODEL} (fallback)"
+
+    out = strip_fences(out)
+    print(out)
+
+    try:  # audit trail; never fatal
+        os.makedirs(DONE, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        with open(os.path.join(DONE, f"{ts}-ask.md"), "w") as f:
+            f.write(f"# cockpit-ask {ts}\n\n## prompt\n\n{prompt}\n\n## {backend}\n\n{out}\n")
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()

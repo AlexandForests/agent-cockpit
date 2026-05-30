@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stub zellij for `cockpit-fanout --panes` integration tests.
+# Records every invocation to $ZELLIJ_STUB_LOG. For `run ... -- <script>`, executes the
+# script synchronously so the task's .out/.done files are produced (real zellij runs it
+# async in a pane; synchronous here is fine — we test the logic, not the timing).
+log="${ZELLIJ_STUB_LOG:-/dev/null}"
+echo "zellij $*" >> "$log"
+case "${1:-}" in
+  action) exit 0 ;;                     # new-tab / go-to-tab-name — just record
+  run)
+    while [ "${1:-}" != "--" ] && [ $# -gt 0 ]; do shift; done
+    shift                               # drop the "--"
+    [ -n "${1:-}" ] && bash "$1"
+    exit 0 ;;
+  *) exit 0 ;;
+esac

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stub cockpit-agent for fanout integration tests.
+# Skips --model/--verify flags, takes <repo> <task...>; behavior keyed by task text.
+while [ "${1:-}" = "--model" ] || [ "${1:-}" = "-m" ] || [ "${1:-}" = "--verify" ] || [ "${1:-}" = "-v" ]; do shift 2; done
+repo="$1"; shift; task="$*"
+if echo "$task" | grep -q FAIL; then
+    echo "RESULT status=nochanges branch=- model=- verify=none changed=-"; exit 1
+fi
+br="cockpit/stub-$$-$RANDOM"
+git -C "$repo" branch "$br" >/dev/null 2>&1
+echo "RESULT status=ok branch=$br model=stub verify=ok changed=1"; exit 0

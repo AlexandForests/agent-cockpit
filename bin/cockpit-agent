@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# cockpit-agent — agentic dispatch to a worker model via opencode, in an isolated git worktree.
+#
+# Runs in a fresh worktree/branch so the agent edits freely without touching your checkout
+# or colliding with other panes. Produces a committed branch + a diff to review, then merge/discard.
+#
+# Usage:   cockpit-agent [--model PROVIDER/MODEL] <repo-dir> "<task description>"
+# Default: opencode/big-pickle — free and the most reliable agent in the bake-off (3/3 vs
+#          qwen3-coder's ~50%). Override per-call with --model, or globally with COCKPIT_AGENT_MODEL.
+# Examples:
+#   cockpit-agent ~/Desktop/claude/bart-tracker "add a loading spinner to the map view"
+#   cockpit-agent --model nvidia/moonshotai/kimi-k2-instruct ~/proj "hard multi-step refactor"
+#
+# Keep bulk/mechanical codegen on the free local razernode via cockpit-ask.
+
+set -uo pipefail
+
+# Free-only fallback chain by default; tasks try each model until one produces changes.
+MODELS="${COCKPIT_AGENT_MODELS:-opencode/big-pickle opencode/deepseek-v4-flash-free}"
+VERIFY="${COCKPIT_VERIFY:-}"   # optional command run in the worktree to auto-flag broken diffs
+DONE="$HOME/cockpit/tasks/done"
+WT_ROOT="$HOME/cockpit/worktrees"
+TIMEOUT=300   # opencode has no request timeout; some models stall
+
+# optional leading flags (any order): --model PROVIDER/MODEL, --verify "<cmd>"
+while true; do case "${1:-}" in
+    --model|-m)  MODELS="${2:?--model needs a value}"; shift 2;;   # pins one model (or a custom chain)
+    --verify|-v) VERIFY="${2:?--verify needs a value}"; shift 2;;
+    *) break;;
+esac; done
+
+repo="${1:-}"; [ $# -gt 0 ] && shift
+task="${*:-}"
+if [ -z "$repo" ] || [ -z "$task" ]; then
+    echo 'usage: cockpit-agent [--model PROVIDER/MODEL] [--verify "<cmd>"] <repo-dir> "<task>"' >&2; exit 2
+fi
+repo="$(cd "$repo" 2>/dev/null && pwd)" || { echo "cockpit-agent: no such dir: ${1:-}" >&2; exit 1; }
+git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || { echo "cockpit-agent: not a git repo: $repo" >&2; exit 1; }
+# only nvidia/* models need the key; free opencode/* models don't
+case " $MODELS " in *" nvidia/"*) [ -n "${NVIDIA_API_KEY:-}" ] || { echo "cockpit-agent: NVIDIA_API_KEY not set (needed for an nvidia/* model in the chain)" >&2; exit 1; };; esac
+
+ts="$(date +%Y%m%d-%H%M%S)-$$"   # PID suffix: unique branch/worktree/log even when fanned out concurrently within the same second
+branch="cockpit/$ts"
+wt="$WT_ROOT/$(basename "$repo")-$ts"
+mkdir -p "$WT_ROOT" "$DONE"
+
+git -C "$repo" worktree add -q -b "$branch" "$wt" HEAD
+echo "→ worktree $wt  (branch $branch off $(git -C "$repo" rev-parse --short HEAD))"
+echo "→ dispatching to $MODELS …"
+
+log="$DONE/$ts-agent-$(basename "$repo").log"   # outside the worktree, so it isn't committed
+: > "$log"
+tries="${COCKPIT_AGENT_TRIES:-3}"               # the agent flakes (stalls / quits early); retry
+changed=0; used_model="-"
+for MODEL in $MODELS; do
+    case "$MODEL" in nvidia/*) [ -n "${NVIDIA_API_KEY:-}" ] || { echo "  skip $MODEL (no NVIDIA_API_KEY)"; continue; };; esac
+    echo "→ model $MODEL"
+    echo "===== model $MODEL =====" >> "$log"
+    for ((t=1; t<=tries; t++)); do
+        echo "  attempt $t/$tries …"
+        git -C "$wt" reset -q --hard HEAD 2>/dev/null; git -C "$wt" clean -qfd 2>/dev/null
+        ( cd "$wt" && opencode run "$task" -m "$MODEL" ) >>"$log" 2>&1 &
+        pid=$!
+        for ((i=0; i<TIMEOUT; i+=3)); do kill -0 "$pid" 2>/dev/null || break; sleep 3; done
+        if kill -0 "$pid" 2>/dev/null; then echo "    timed out after ${TIMEOUT}s — killing"; kill "$pid" 2>/dev/null; fi
+        if [ -n "$(git -C "$wt" status --porcelain)" ]; then changed=1; used_model="$MODEL"; break; fi
+        echo "    no changes"
+    done
+    [ "$changed" = 1 ] && break
+    echo "  $MODEL produced nothing — trying next model in the chain"
+done
+
+if [ "$changed" = 0 ]; then
+    git -C "$repo" worktree remove --force "$wt" 2>/dev/null   # nothing produced — clean up fully
+    git -C "$repo" branch -D "$branch" 2>/dev/null
+    echo "RESULT status=nochanges branch=- model=- verify=none changed=-"
+    echo "cockpit-agent: no changes after all models/attempts. See $log" >&2
+    exit 1
+fi
+
+git -C "$wt" add -A
+git -C "$wt" commit -q -m "cockpit-agent: $task"
+record_diff="$(git -C "$repo" --no-pager diff "HEAD..$branch")"
+
+# optional verify (run in the worktree before we drop it) — auto-flags broken diffs
+verify_note="(no --verify given)"; verify_state="none"
+if [ -n "$VERIFY" ]; then
+    echo "===== verify: $VERIFY =====" >> "$log"
+    if ( cd "$wt" && eval "$VERIFY" ) >>"$log" 2>&1; then verify_note="✓ passed: $VERIFY"; verify_state="ok"; else verify_note="✗ FAILED: $VERIFY (see log)"; verify_state="fail"; fi
+fi
+changed_n="$(git -C "$repo" diff --name-only "HEAD..$branch" | wc -l | tr -d ' ')"
+git -C "$repo" worktree remove --force "$wt" 2>/dev/null   # work is safe on $branch; drop the worktree
+
+record="$DONE/$ts-agent-$(basename "$repo").md"
+{ echo "# cockpit-agent $ts"; echo; echo "## repo"; echo "$repo  (branch $branch)";
+  echo; echo "## task"; echo "$task"; echo; echo "## verify"; echo "$verify_note";
+  echo; echo "## diff"; echo '```diff'; echo "$record_diff"; echo '```'; } > "$record"
+
+echo "──────── result (branch $branch) ────────"
+git -C "$repo" --no-pager diff --stat "HEAD..$branch"
+echo "verify: $verify_note"
+echo
+echo "VERIFY then apply (don't merge unseen): review the diff, run py_compile/tests, then:"
+echo "  apply:   git -C \"$repo\" merge --no-ff $branch"
+echo "  discard: git -C \"$repo\" branch -D $branch"
+echo "record:  $record   log: $log"
+echo "RESULT status=ok branch=$branch model=$used_model verify=$verify_state changed=$changed_n"

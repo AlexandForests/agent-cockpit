@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# cockpit-doctor — preflight for the agent cockpit. Run before starting a project to
+# greenlight the whole stack so nothing surprises you mid-work.
+set -uo pipefail
+
+RAZER="${COCKPIT_ASK_ENDPOINT:-http://localhost:11434}"
+RAZER_MODEL="qwen2.5-coder-32k:latest"
+fail=0
+ok()   { printf "  \033[32m✓\033[0m %s\n" "$1"; }
+warn() { printf "  \033[33m!\033[0m %s\n" "$1"; }
+bad()  { printf "  \033[31m✗\033[0m %s\n" "$1"; fail=1; }
+
+echo "cockpit-doctor"
+
+echo "tools:"
+for t in claude opencode zellij git python3; do
+    command -v "$t" >/dev/null 2>&1 && ok "$t" || bad "$t not on PATH"
+done
+
+echo "dispatch helpers:"
+for h in cockpit cockpit-ask cockpit-agent; do
+    command -v "$h" >/dev/null 2>&1 && ok "$h" || bad "$h not on PATH"
+done
+
+echo "razernode (free local completion worker):"
+if curl -s --max-time 5 "$RAZER/api/version" >/dev/null 2>&1; then
+    ok "reachable ($RAZER)"
+    if curl -s --max-time 5 "$RAZER/v1/models" 2>/dev/null | grep -q "$RAZER_MODEL"; then
+        ok "model $RAZER_MODEL loaded"
+    else
+        warn "model $RAZER_MODEL missing — recreate it (ollama create ... num_ctx 32768)"
+    fi
+else
+    warn "unreachable (laptop asleep?) — cockpit-ask will fall back to a free cloud model"
+fi
+
+echo "opencode free agent (big-pickle):"
+probe=$(mktemp)
+( opencode run "Reply with exactly: ok" -m opencode/big-pickle >"$probe" 2>&1 ) &
+pid=$!; for ((i=0;i<30;i+=2)); do kill -0 $pid 2>/dev/null || break; sleep 2; done
+kill $pid 2>/dev/null
+grep -qi "ok" "$probe" && ok "big-pickle responds (free, agentic)" || bad "big-pickle not responding (opencode auth/network?)"
+rm -f "$probe"
+
+echo "escalation key:"
+[ -n "${NVIDIA_API_KEY:-}" ] && ok "NVIDIA_API_KEY set" || warn "NVIDIA_API_KEY unset (only needed to escalate cockpit-agent to nvidia/* models)"
+
+echo "runtime dirs:"
+[ -d "$HOME/cockpit/tasks/done" ] && ok "~/cockpit present" || bad "~/cockpit missing — run install.sh"
+[ -e "$HOME/cockpit/CLAUDE.md" ] && ok "dispatch protocol linked" || warn "~/cockpit/CLAUDE.md missing — run install.sh"
+
+echo
+if [ $fail = 0 ]; then echo -e "\033[32mREADY ✓\033[0m  — cockpit is good to go"; else echo -e "\033[31mNOT READY ✗\033[0m — fix the ✗ items above"; fi
+exit $fail

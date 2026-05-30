@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Stub wezterm for autostart tests: record args instead of launching a GUI.
+echo "wezterm $*" >> "${WEZTERM_STUB_MARKER:-/dev/null}"
+exit 0

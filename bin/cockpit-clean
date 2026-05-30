@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# cockpit-clean — tidy up after many dispatches:
+#   - delete cockpit/* branches already MERGED into the current branch (safe; keeps unmerged ones)
+#   - prune stale worktrees
+#   - trim ~/cockpit/tasks/done audit records older than COCKPIT_KEEP_DAYS (default 14)
+# Usage: cockpit-clean [repo-dir]   (defaults to the current directory)
+set -uo pipefail
+
+DAYS="${COCKPIT_KEEP_DAYS:-14}"
+repo="${1:-$PWD}"
+echo "cockpit-clean"
+
+if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$repo" worktree prune
+    cur="$(git -C "$repo" branch --show-current)"
+    merged="$(git -C "$repo" branch --merged "$cur" --list 'cockpit/*' | tr -d ' *')"
+    if [ -n "$merged" ]; then
+        echo "$merged" | while read -r b; do [ -n "$b" ] && git -C "$repo" branch -d "$b" >/dev/null && echo "  deleted merged $b"; done
+    else
+        echo "  no merged cockpit/* branches in $(basename "$repo")"
+    fi
+    unmerged="$(git -C "$repo" branch --no-merged "$cur" --list 'cockpit/*' | tr -d ' *')"
+    if [ -n "$unmerged" ]; then
+        echo "  kept (unmerged — apply or discard yourself):"; echo "$unmerged" | sed 's/^/    /'
+    fi
+else
+    echo "  (not a git repo: $repo — skipping branch cleanup)"
+fi
+
+dir="$HOME/cockpit/tasks/done"
+n="$(find "$dir" -type f -mtime +"$DAYS" 2>/dev/null | wc -l | tr -d ' ')"
+find "$dir" -type f -mtime +"$DAYS" -delete 2>/dev/null
+echo "  trimmed $n audit record(s) older than ${DAYS}d"
