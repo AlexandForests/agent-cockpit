@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""cockpit-fanout — run N cockpit-agent tasks concurrently and roll up a summary.
+
+Usage: cockpit-fanout <batch.json>
+batch.json: [{"repo": "...", "task": "...", "verify": "...(opt)", "model": "...(opt)"}, ...]
+Env: COCKPIT_FANOUT_JOBS (default 3).
+"""
+import sys, os, re, json, time, shlex, shutil, subprocess
+from concurrent.futures import ThreadPoolExecutor
+
+DONE = os.path.expanduser("~/cockpit/tasks/done")
+JOBS = int(os.environ.get("COCKPIT_FANOUT_JOBS", "3"))
+_RESULT_RE = re.compile(r"^RESULT\s+(.*)$", re.M)
+
+
+def parse_result(stdout):
+    """Extract the last `RESULT key=val ...` line into a dict (defaults if absent)."""
+    fields = {"status": "nochanges", "branch": "-", "model": "-", "verify": "none", "changed": "-"}
+    last = None
+    for last in _RESULT_RE.finditer(stdout):
+        pass
+    if last:
+        for kv in last.group(1).split():
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                fields[k] = v
+    return fields
+
+
+def build_summary(batch_id, jobs, results):
+    """results: list of (idx, task, fields-dict). Returns a markdown summary string."""
+    vmap = {"ok": "✓", "fail": "✗", "none": "-"}
+    lines = [f"batch {batch_id}  ({len(results)} tasks, {jobs} concurrent)", "",
+             "| # | task | branch | model | verify | changed | status |",
+             "|---|------|--------|-------|--------|---------|--------|"]
+    for idx, task, f in results:
+        t = (task[:40] + "…") if len(task) > 41 else task
+        lines.append(f"| {idx} | {t} | {f['branch']} | {f['model']} | "
+                     f"{vmap.get(f['verify'], f['verify'])} | {f['changed']} | {f['status']} |")
+    lines += ["", "per task — review: git -C <repo> diff HEAD..<branch>   "
+              "merge: git -C <repo> merge --no-ff <branch>"]
+    return "\n".join(lines)
+
+
+def agent_cmd(entry):
+    """Build the cockpit-agent argv for one batch entry (repo is expanduser'd)."""
+    cmd = ["cockpit-agent"]
+    if entry.get("model"):
+        cmd += ["--model", entry["model"]]
+    if entry.get("verify"):
+        cmd += ["--verify", entry["verify"]]
+    cmd += [os.path.expanduser(entry["repo"]), entry["task"]]
+    return cmd
+
+
+def run_task(idx, entry, batch_dir):
+    task = entry["task"]
+    p = subprocess.run(agent_cmd(entry), capture_output=True, text=True)
+    with open(os.path.join(batch_dir, f"task-{idx}.out"), "w") as f:
+        f.write(p.stdout + "\n----- stderr -----\n" + p.stderr)
+    return (idx, task, parse_result(p.stdout))
+
+
+def visible_mode(panes):
+    """True only if --panes was given AND we're inside a zellij session AND zellij is on PATH."""
+    return bool(panes and os.environ.get("ZELLIJ") and shutil.which("zellij"))
+
+
+def parse_args(argv):
+    """Returns (panes: bool, batch_path: str). --panes may appear anywhere."""
+    panes = False
+    rest = []
+    for a in argv:
+        if a == "--panes":
+            panes = True
+        else:
+            rest.append(a)
+    if len(rest) != 1:
+        sys.exit("usage: cockpit-fanout [--panes] <batch.json>")
+    return panes, rest[0]
+
+
+def await_sentinel(done_path, timeout, poll=0.5):
+    """Poll until done_path exists; return True if it appeared within timeout, else False."""
+    waited = 0.0
+    while waited < timeout:
+        if os.path.exists(done_path):
+            return True
+        time.sleep(poll)
+        waited += poll
+    return os.path.exists(done_path)
+
+
+def build_wrapper(idx, entry, batch_dir):
+    """Bash wrapper for a task pane: runs cockpit-agent, tees output to task-N.out,
+    writes the agent's exit code to task-N.done (the completion sentinel)."""
+    out = os.path.join(batch_dir, f"task-{idx}.out")
+    done = os.path.join(batch_dir, f"task-{idx}.done")
+    agent = " ".join(shlex.quote(a) for a in agent_cmd(entry))
+    return (
+        "#!/usr/bin/env bash\n"
+        f"{agent} 2>&1 | tee {shlex.quote(out)}\n"
+        'echo "${PIPESTATUS[0]}" > ' + shlex.quote(done) + "\n"
+    )
+
+
+def write_wrapper(idx, entry, batch_dir):
+    """Write task-N.sh (executable) and return its path."""
+    path = os.path.join(batch_dir, f"task-{idx}.sh")
+    with open(path, "w") as f:
+        f.write(build_wrapper(idx, entry, batch_dir))
+    os.chmod(path, 0o755)
+    return path
+
+
+def spawn_pane(idx, entry, batch_dir, tab):
+    """Write the task wrapper, focus the fan-out tab, and spawn the task in a new pane.
+    Returns the `zellij run` return code (0 on success)."""
+    script = write_wrapper(idx, entry, batch_dir)
+    repo = os.path.expanduser(entry["repo"])
+    label = entry["task"][:30]
+    subprocess.run(["zellij", "action", "go-to-tab-name", tab], capture_output=True, text=True)
+    p = subprocess.run(
+        ["zellij", "run", "--name", f"task-{idx}: {label}", "--cwd", repo, "--", script],
+        capture_output=True, text=True,
+    )
+    return p.returncode
+
+
+def _fields(status):
+    return {"status": status, "branch": "-", "model": "-", "verify": "none", "changed": "-"}
+
+
+def run_task_visible(idx, entry, batch_dir, tab, timeout=720.0, poll=0.5):
+    """Spawn the task in a live pane; block on its sentinel; parse the captured output.
+    Bounded concurrency comes from the caller's ThreadPoolExecutor (this blocks per task)."""
+    if spawn_pane(idx, entry, batch_dir, tab) != 0:
+        return (idx, entry["task"], _fields("spawn-failed"))
+    done = os.path.join(batch_dir, f"task-{idx}.done")
+    if not await_sentinel(done, timeout, poll):
+        return (idx, entry["task"], _fields("timeout"))
+    with open(os.path.join(batch_dir, f"task-{idx}.out")) as f:
+        return (idx, entry["task"], parse_result(f.read()))
+
+
+def main():
+    panes, batch_path = parse_args(sys.argv[1:])
+    with open(os.path.expanduser(batch_path)) as f:
+        entries = json.load(f)
+    if not isinstance(entries, list) or not entries:
+        sys.exit("cockpit-fanout: batch file must be a non-empty JSON array")
+    for i, e in enumerate(entries):
+        if "repo" not in e or "task" not in e:
+            sys.exit(f"cockpit-fanout: entry {i} missing required 'repo' or 'task'")
+
+    batch_id = time.strftime("%Y%m%d-%H%M%S")
+    batch_dir = os.path.join(DONE, batch_id)
+    os.makedirs(batch_dir, exist_ok=True)
+
+    visible = visible_mode(panes)
+    if panes and not visible:
+        print("cockpit-fanout: --panes ignored (not inside a zellij session) — running headless",
+              file=sys.stderr)
+
+    tab = None
+    if visible:
+        tab = f"fanout-{batch_id}"
+        subprocess.run(["zellij", "action", "new-tab", "--name", tab], capture_output=True, text=True)
+
+    print(f"cockpit-fanout: {len(entries)} tasks, {JOBS} concurrent → batch {batch_id}"
+          + (f"  (panes: tab {tab})" if visible else ""))
+
+    def dispatch(idx, entry):
+        if visible:
+            return run_task_visible(idx, entry, batch_dir, tab)
+        return run_task(idx, entry, batch_dir)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=JOBS) as ex:
+        futs = [ex.submit(dispatch, i + 1, e) for i, e in enumerate(entries)]
+        for fut in futs:
+            results.append(fut.result())
+    results.sort(key=lambda r: r[0])
+
+    summary = build_summary(batch_id, JOBS, results)
+    with open(os.path.join(batch_dir, "summary.md"), "w") as f:
+        f.write(summary + "\n")
+    print("\n" + summary)
+    sys.exit(0 if all(f["status"] == "ok" for _, _, f in results) else 1)
+
+
+if __name__ == "__main__":
+    main()
