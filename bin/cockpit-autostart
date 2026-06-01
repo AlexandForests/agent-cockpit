@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# cockpit-autostart — enable/disable login autostart of the cockpit (a per-user LaunchAgent).
+#   install    write the plist + load it (cockpit opens fullscreen at login)
+#   uninstall  unload + remove it
+#   status     show whether it's loaded
+# Test hooks: COCKPIT_AUTOSTART_PLIST overrides the plist path; COCKPIT_AUTOSTART_NO_LOAD skips launchctl.
+set -uo pipefail
+
+# Resolve the repo root even when invoked via the ~/.local/bin symlink.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+REPO="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+UID_NUM="$(id -u)"
+LABEL="com.$(id -un).cockpit"
+PLIST="${COCKPIT_AUTOSTART_PLIST:-$HOME/Library/LaunchAgents/${LABEL}.plist}"
+RUNNER="$REPO/bin/cockpit-autostart-run"
+LUA="$REPO/wezterm/cockpit.lua"
+LOG="$HOME/cockpit/autostart.log"
+
+write_plist() {
+    mkdir -p "$(dirname "$PLIST")"
+    cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${RUNNER}</string>
+    <string>${LUA}</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>${LOG}</string>
+  <key>StandardErrorPath</key><string>${LOG}</string>
+</dict>
+</plist>
+PLIST
+    plutil -lint "$PLIST" >/dev/null
+}
+
+case "${1:-}" in
+  install)
+    write_plist
+    echo "wrote $PLIST"
+    [ -n "${COCKPIT_AUTOSTART_NO_LOAD:-}" ] && { echo "(skipped load)"; exit 0; }
+    launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null
+    launchctl bootstrap "gui/${UID_NUM}" "$PLIST" 2>/dev/null || launchctl load "$PLIST"
+    echo "loaded ${LABEL} — opens at login; test now with: launchctl kickstart -k gui/${UID_NUM}/${LABEL}"
+    ;;
+  uninstall)
+    [ -z "${COCKPIT_AUTOSTART_NO_LOAD:-}" ] && \
+        { launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null; }
+    rm -f "$PLIST"
+    echo "removed ${LABEL}"
+    ;;
+  status)
+    if launchctl print "gui/${UID_NUM}/${LABEL}" >/dev/null 2>&1; then echo "${LABEL}: loaded"
+    elif [ -f "$PLIST" ]; then echo "${LABEL}: plist present, not loaded ($PLIST)"
+    else echo "${LABEL}: not installed"; fi
+    ;;
+  *) echo "usage: cockpit-autostart {install|uninstall|status}" >&2; exit 2 ;;
+esac

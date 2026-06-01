@@ -1,0 +1,17 @@
+#!/bin/zsh -l
+# LaunchAgent wrapper, run at login. $1 = absolute path to the cockpit WezTerm config.
+#
+# Login shell (-l) so the interactive PATH (Homebrew, ~/.local/bin) flows down to
+# wezterm -> cockpit -> the zellij server -> every pane. launchd's own PATH is minimal,
+# which would otherwise leave the worker panes unable to find opencode/claude.
+#
+# Idempotent: if a cockpit WezTerm is already running, do nothing (no duplicate window).
+# COCKPIT_AUTOSTART_FORCE_RUNNING=1/0 overrides the detection (used by tests).
+
+running="${COCKPIT_AUTOSTART_FORCE_RUNNING:-}"
+if [[ -z "$running" ]]; then
+  if pgrep -f 'wezterm --config-file.*cockpit\.lua' >/dev/null 2>&1; then running=1; else running=0; fi
+fi
+[[ "$running" == 1 ]] && exit 0
+
+exec wezterm --config-file "$1" start
