@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "obsidian": {
+      "type": "stdio",
+      "command": "zsh",
+      "args": [
+        "-c",
+        "exec mcp-obsidian \"$HOME/Documents/obsidian/<your-vault>\" 2>>$HOME/.cache/cockpit-mcp-obsidian.log"
+      ]
+    }
+  }
+}
