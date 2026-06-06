@@ -52,6 +52,18 @@ Default agent = **`opencode/big-pickle`** (free; 3/3 @ ~9s in the 2026-05-29 bak
 key only needed for `nvidia/*`. `--verify`/`COCKPIT_VERIFY` runs a build/test in the worktree and flags
 failures. Results/log land in `~/cockpit/tasks/done/`. Routing + model menu: `cockpit-home/CLAUDE.md`.
 
+## Codex (on-demand escalation)
+Dispatch is model-agnostic: any executor reachable through opencode drops in via `--model PROVIDER/MODEL`
+on the same path the free workers use — no special-casing. Codex sits in the routing tier as the
+**on-demand agentic escalation**: free local workers handle the bulk, Codex takes the hard multi-step
+tasks that need a stronger executor.
+```sh
+cockpit-agent --model openai/codex ~/proj "hard multi-step refactor"     # one-off escalation
+export COCKPIT_AGENT_MODELS="openai/codex opencode/big-pickle"           # Codex-first chain, free fallback
+```
+It's metered today, so it stays on-demand by default. With credits it becomes a standing chain
+entry — see the routing menu in `cockpit-home/CLAUDE.md`.
+
 ## Launch
 ```sh
 cockpit          # attach-or-create the 4-pane Zellij session
