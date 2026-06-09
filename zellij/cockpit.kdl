@@ -25,13 +25,12 @@ layout {
             // shell-initialized terminal — a direct `command "claude"` shows
             // only the MCP banner and never paints the UI inside zellij.
             //
-            // VERSION PIN (2026-06-02): claude 2.1.161 (released today) regressed
-            // this same inline render inside zellij — the pane shows only the MCP
-            // banner and never paints, in BOTH WezTerm and Ghostty. 2.1.157–2.1.159
-            // rendered fine, so we pin to a known-good build via ${COCKPIT_CLAUDE}.
-            // Bump/revert when a newer claude fixes zellij rendering, e.g.:
-            //   COCKPIT_CLAUDE=$(command -v claude) cockpit --fresh
-            // or just edit the default version below.
+            // RENDER NOTE (2026-06-02): claude 2.1.161 regressed inline render inside zellij —
+            // the pane shows only the MCP banner and never paints (WezTerm + Ghostty); 2.1.157–
+            // 2.1.159 were fine. We used to hard-pin 2.1.160, but that build got garbage-collected
+            // (2026-06-08), so we now default to the `claude` on PATH (stable symlink → latest).
+            // Pin a specific build if rendering regresses again:
+            //   COCKPIT_CLAUDE=~/.local/share/claude/versions/<ver> cockpit --fresh
             pane split_direction="vertical" {
                 pane name="claude-orchestrate" focus=true {
                     // `cd ~/cockpit` so Claude reliably auto-loads the dispatch protocol
@@ -39,11 +38,11 @@ layout {
                     // we force it in the shell — otherwise the pane thinks cockpit-ask is a
                     // missing sub-agent instead of a Bash command.
                     command "zsh"
-                    args "-ilc" "cd ~/cockpit && ${COCKPIT_CLAUDE:-$HOME/.local/share/claude/versions/2.1.160} --strict-mcp-config --mcp-config ~/Desktop/claude/agent-cockpit/mcp/cockpit.mcp.json"
+                    args "-ilc" "cd ~/cockpit && ${COCKPIT_CLAUDE:-claude} --strict-mcp-config --mcp-config ~/Desktop/claude/agent-cockpit/mcp/cockpit.mcp.json"
                 }
                 pane name="claude-code" {
                     command "zsh"
-                    args "-ilc" "${COCKPIT_CLAUDE:-$HOME/.local/share/claude/versions/2.1.160} --strict-mcp-config --mcp-config ~/Desktop/claude/agent-cockpit/mcp/cockpit.mcp.json"
+                    args "-ilc" "${COCKPIT_CLAUDE:-claude} --strict-mcp-config --mcp-config ~/Desktop/claude/agent-cockpit/mcp/cockpit.mcp.json"
                 }
             }
             // bottom row — workers

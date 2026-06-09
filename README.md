@@ -6,6 +6,8 @@ Build a permanent multi-agent terminal cockpit on monitor 2.
 
 > **Node-agnostic.** The node names (`razernode`, `gamendoe`), GPUs, and topology below are my reference rig — bring your own: set `COCKPIT_ASK_ENDPOINT` for the completion worker and your own opencode providers for the agentic one.
 
+> **Lean path.** This is the lean cockpit — no instrumentation, just the panes. Its v2, **pilot-the-cockpit**, layers a read-only live lane board over the same dispatch (every concurrent worker/subagent: status · action · stall). v1 stays fully functional; v2's telemetry shims are guarded on an env var that's unset here, so they no-op in lean mode.
+
 ## Decisions already locked (don't re-litigate)
 - **Mac is the cockpit.** All agent CLIs run on the Mac. The GPU boxes are pure model servers.
 - **Claude orchestrates** — 2 Claude panes (one routes/dispatches work to the best executor + conserves its own tokens, one codes). opencode local agents are workers; **Codex is on-demand**.
